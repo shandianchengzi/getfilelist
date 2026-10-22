@@ -347,9 +347,21 @@
     for (const result of results) {
       lines.push(result.title + ' (' + result.share_url + ')');
       if (!result.rows.length) lines.push('(空目录)');
+      const children = new Map();
       for (const row of result.rows) {
+        if (!children.has(row.parent_path)) children.set(row.parent_path, []);
+        children.get(row.parent_path).push(row);
+      }
+      // 扫描使用 BFS；导出树需要 DFS，使每个文件夹的内容紧随其后。
+      const stack = (children.get('/') || []).slice().reverse();
+      while (stack.length) {
+        const row = stack.pop();
         lines.push('  '.repeat(Math.max(0, row.depth)) + (row.is_folder ? '[目录] ' : '[文件] ') +
           row.name + (row.is_folder ? '/' : (row.size_bytes === null ? '' : ' (' + row.size_bytes + ' bytes)')));
+        if (row.is_folder) {
+          const descendants = children.get(row.path) || [];
+          for (let i = descendants.length - 1; i >= 0; i--) stack.push(descendants[i]);
+        }
       }
       lines.push('');
     }
