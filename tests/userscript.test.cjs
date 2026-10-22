@@ -14,7 +14,7 @@ function loadWith(fetch, storedToken) {
   const end = source.indexOf('  // Shadow DOM 防止');
   assert.ok(start > 0 && end > start, 'userscript business logic found');
   const isolated = source.slice(start, end) +
-    'return { parseShares, scanShare, csv, tree, isFolder }; })();';
+    'return { parseShares, scanShare, csv, tree, isFolder, nameList }; })();';
   const load = new Function(
     'location', 'document', 'sessionStorage', 'fetch', 'URL', 'DOMException', 'setTimeout',
     'return ' + isolated
@@ -93,6 +93,15 @@ test('fetches all pages and child folders, exports CSV JSON fields and ordered t
   const output = api.tree([result]);
   assert.ok(output.indexOf('subfolder/') < output.indexOf('inside.pdf'));
   assert.ok(output.indexOf('inside.pdf') < output.indexOf('last.txt'));
+  const fileNames = api.nameList([result], false).split('\n');
+  assert.equal(fileNames.length, 51);
+  assert.ok(fileNames.includes('inside.pdf'));
+  assert.ok(fileNames.includes('=HYPERLINK("x")'));
+  assert.ok(!fileNames.includes('subfolder'));
+  assert.ok(fileNames.every(name => !name.includes('/')));
+  const namesWithFolders = api.nameList([result], true).split('\n');
+  assert.equal(namesWithFolders.length, 52);
+  assert.ok(namesWithFolders.includes('subfolder'));
 });
 
 test('fails on API errors instead of exporting truncated results', async () => {
@@ -127,4 +136,29 @@ test('abort does not make a partial export appear successful', async () => {
     api.scanShare(share, true, { aborted: true }, () => {}),
     /已停止/
   );
+});
+
+test('name-only copy keeps repeated names across different shares and excludes metadata', () => {
+  const api = loadWith(async () => response({}));
+  const results = [
+    { rows: [{ name: 'same.mp4', is_folder: false, path: '/a/same.mp4', size_bytes: 99 }, { name: 'folder', is_folder: true }] },
+    { rows: [{ name: 'same.mp4', is_folder: false, path: '/b/same.mp4', size_bytes: 101 }, { name: 'line\nbreak.txt', is_folder: false }] }
+  ];
+  assert.equal(api.nameList(results, false), 'same.mp4\nsame.mp4\nline break.txt');
+  assert.equal(api.nameList(results, true), 'same.mp4\nfolder\nsame.mp4\nline break.txt');
+  assert.equal(api.nameList([{ rows: [{ name: 'folder', is_folder: true }] }], false), '');
+});
+
+test('single-share legacy script also exposes filename-only helper', () => {
+  const original = fs.readFileSync(path.join(__dirname, '..', 'quark-share-file-list.user.js'), 'utf8');
+  const start = original.indexOf('  function filenameList(data, includeFolders) {');
+  const end = original.indexOf('  function csvCell(value) {', start);
+  assert.ok(start > 0 && end > start);
+  const names = new Function(original.slice(start, end) + 'return filenameList;')();
+  assert.equal(names({ items: [
+    { name: 'A.mp4', type: 'file' }, { name: '相册', type: 'folder' }
+  ] }, false), 'A.mp4');
+  assert.equal(names({ items: [
+    { name: 'A.mp4', type: 'file' }, { name: '相册', type: 'folder' }
+  ] }, true), 'A.mp4\n相册');
 });
