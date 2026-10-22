@@ -119,6 +119,7 @@
   async function request(url, options, signal) {
     let lastError;
     for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+      if (signal.aborted) throw new DOMException('已停止', 'AbortError');
       if (attempt) await pause(Math.min(600 * Math.pow(2, attempt - 1), 3500), signal);
       try {
         const response = await fetch(url, Object.assign({
