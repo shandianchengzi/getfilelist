@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         夸克网盘分享文件列表导出
 // @namespace    https://github.com/shandianchengzi/getfilelist
-// @version      1.0.0
+// @version      1.1.0
 // @description  递归读取夸克网盘分享文件列表，支持 TXT/CSV/JSON 导出
 // @author       shandianchengzi
 // @match        https://pan.quark.cn/s/*
@@ -268,6 +268,11 @@
     return lines.join('\n') + '\n';
   }
 
+  function filenameList(data, includeFolders) {
+    return data.items.filter(item => includeFolders || item.type === 'file')
+      .map(item => item.name.replace(/[\r\n]+/g, ' ')).join('\n');
+  }
+
   function csvCell(value) {
     let str = value == null ? '' : String(value);
     if (/^[\s\x00-\x1f]*[=+@-]/.test(str)) str = "'" + str;
@@ -335,13 +340,24 @@
     });
     const copy = ui('button', '复制目录树', panel);
     buttons.push(copy);
+    const copyNames = ui('button', '仅复制名称', panel);
+    buttons.push(copyNames);
+    const namesIncludeLabel = ui('label', '包含文件夹', panel);
+    const namesInclude = ui('input', undefined, namesIncludeLabel);
+    namesInclude.type = 'checkbox';
+    namesInclude.style.width = 'auto';
+    namesInclude.style.marginLeft = '6px';
     const status = ui('div', '点击「扫描完整目录」开始。', panel);
     status.className = 'qfl-status';
     const preview = ui('pre', '', panel);
+    const nameFallback = ui('textarea', undefined, panel);
+    nameFallback.readOnly = true;
+    nameFallback.style.cssText = 'display:none;width:100%;height:110px;resize:vertical;font:12px/1.5 monospace;white-space:pre;';
     function setBusy(busy) {
       begin.disabled = busy;
       stop.disabled = !busy;
       code.disabled = busy;
+      namesInclude.disabled = busy;
       for (const button of buttons) button.disabled = busy || !result;
     }
     const say = value => { status.textContent = value; };
@@ -349,6 +365,8 @@
       if (running) return;
       result = null;
       preview.textContent = '';
+      nameFallback.style.display = 'none';
+      nameFallback.value = '';
       running = new AbortController();
       setBusy(true);
       try {
@@ -375,6 +393,29 @@
         say('目录树已复制到剪贴板。');
       } catch (error) {
         say('复制失败：' + error.message + '；请导出 TXT。');
+      }
+    };
+    copyNames.onclick = async () => {
+      if (!result) return;
+      const names = filenameList(result, namesInclude.checked);
+      if (!names) {
+        say('没有可复制的' + (namesInclude.checked ? '条目' : '文件') + '名称。');
+        return;
+      }
+      nameFallback.style.display = 'none';
+      const count = result.items.filter(item => namesInclude.checked || item.type === 'file').length;
+      try {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+          throw Error('此浏览器不支持剪贴板 API');
+        }
+        await navigator.clipboard.writeText(names);
+        say('已复制 ' + count + ' 个名称，每行一个，不包含路径和其他信息。');
+      } catch (error) {
+        nameFallback.value = names;
+        nameFallback.style.display = 'block';
+        nameFallback.focus();
+        nameFallback.select();
+        say('浏览器禁止自动复制，名称已填入下方文本框并选中，请按 Ctrl+C 手动复制。');
       }
     };
     function toggle() {
