@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         夸克网盘分享文件清单批量导出
 // @namespace    https://github.com/shandianchengzi/getfilelist
-// @version      1.0.0
+// @version      1.1.0
 // @description  批量扫描夸克分享链接的全部分页与子文件夹，导出 CSV / JSON（含原始文件元数据）/ TXT 目录树。
 // @author       shandianchengzi
 // @match        https://pan.quark.cn/s/*
@@ -369,6 +369,19 @@
     return '\ufeff' + lines.join('\r\n');
   }
 
+  function nameList(results, includeFolders) {
+    const names = [];
+    for (const result of results) {
+      for (const row of result.rows) {
+        if (includeFolders || !row.is_folder) {
+          // 保留扩展名和重复名称，每个条目独占一行。
+          names.push(String(row.name).replace(/[\r\n]+/g, ' '));
+        }
+      }
+    }
+    return names.join('\n');
+  }
+
   function filenameDate(date) {
     const pad = function (value) { return String(value).padStart(2, '0'); };
     return date.getFullYear() + pad(date.getMonth() + 1) + pad(date.getDate()) +
@@ -426,7 +439,7 @@
     '.row{display:flex;gap:12px;align-items:center;margin:10px 0;flex-wrap:wrap;}',
     '.check{display:flex;gap:6px;align-items:center;margin:0;}',
     '.check input{margin:0;}.action{border:0;border-radius:7px;padding:9px 14px;cursor:pointer;font-weight:600;}',
-    '#start{background:#1867e8;color:white;}#stop{background:#e9edf4;color:#293345;}',
+    '#start{background:#1867e8;color:white;}#copy-names{background:#e6efff;color:#174fa7;}#stop{background:#e9edf4;color:#293345;}',
     'button:disabled{opacity:.55;cursor:not-allowed;}',
     '#status{font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;max-height:130px;overflow-y:auto;color:#344154;border-top:1px solid #eef0f5;padding-top:9px;}',
     '#status.error{color:#ad2020;}'
@@ -445,9 +458,13 @@
     '<option value="json">JSON（含原始元数据）</option>',
     '<option value="txt">TXT（目录树）</option></select>',
     '<label class="check"><input type="checkbox" id="recursive" checked>遍历子文件夹</label></div>',
+    '<div class="row"><label class="check"><input type="checkbox" id="copy-folders">复制名称时包含文件夹</label></div>',
     '<div class="row"><button class="action" id="start" type="button">开始导出</button>',
+    '<button class="action" id="copy-names" type="button">仅复制名称</button>',
     '<button class="action" id="stop" type="button" disabled>停止</button></div>',
     '<div id="status" role="status" aria-live="polite">准备就绪</div>',
+    '<textarea id="names-preview" hidden readonly aria-label="待手动复制的文件名称"></textarea>',
+    '<p>“仅复制名称”不会下载文件，默认只含文件名（保留扩展名、不去重），每行一个；可选择包含文件夹。</p>',
     '<p>CSV 保留常用属性；JSON 保留每个文件的完整原始条目。不会下载网盘文件或上传清单。</p>'
   ].join('');
   const toggle = document.createElement('button');
@@ -463,60 +480,114 @@
   linksEl.value = 'https://pan.quark.cn/s/' + encodeURIComponent(currentShareId());
   let controller = null;
   let running = false;
+  let cached = null;
   toggle.addEventListener('click', function () { panel.hidden = !panel.hidden; });
   $('stop').addEventListener('click', function () {
     if (controller) controller.abort();
   });
+
   function status(message, error) {
     const element = $('status');
     element.textContent = message;
     element.classList.toggle('error', !!error);
   }
+
   function setRunning(value) {
     running = value;
     $('start').disabled = value;
+    $('copy-names').disabled = value;
     $('stop').disabled = !value;
     $('links').disabled = value;
     $('format').disabled = value;
     $('recursive').disabled = value;
+    $('copy-folders').disabled = value;
   }
 
-  $('start').addEventListener('click', async function () {
+  function scanKey() {
+    return JSON.stringify([linksEl.value.trim(), $('recursive').checked]);
+  }
+
+  async function copyNames(results) {
+    const includeFolders = $('copy-folders').checked;
+    const names = nameList(results, includeFolders);
+    const count = names ? names.split('\n').length : 0;
+    const preview = $('names-preview');
+    preview.hidden = true;
+    preview.value = '';
+    if (!names) {
+      status('扫描完成，但没有可复制的' + (includeFolders ? '文件或文件夹' : '文件') + '名称。');
+      return;
+    }
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('浏览器不支持自动复制');
+      }
+      await navigator.clipboard.writeText(names);
+      status('成功复制 ' + count + ' 个名称到剪贴板，每行一个（无路径或其他属性）。');
+    } catch (err) {
+      // 网络扫描可能耗尽临时用户激活；保留扫描缓存让下一次点击无需再次请求。
+      preview.value = names;
+      preview.hidden = false;
+      preview.focus();
+      preview.select();
+      status('已扫描 ' + count + ' 个名称，但浏览器未允许自动复制。\n' +
+        '请再次点击「仅复制名称」，或在下方文本框按 Ctrl+C 手动复制。', true);
+    }
+  }
+
+  async function run(action) {
     if (running) return;
     let shares;
     try { shares = parseShares(linksEl.value); }
     catch (err) { status(err.message, true); return; }
     const recursive = $('recursive').checked;
     const format = $('format').value;
-    const results = [];
+    const key = scanKey();
+    let results = [];
+    const reuse = action === 'copy' && cached && cached.key === key;
     controller = new AbortController();
     setRunning(true);
+    $('names-preview').hidden = true;
     try {
-      for (let i = 0; i < shares.length; i++) {
-        const share = shares[i];
-        status('正在处理分享 ' + (i + 1) + '/' + shares.length + '\n' + share.url +
-          '\n正在获取访问令牌…');
-        const result = await scanShare(share, recursive, controller.signal, function (p) {
-          status('分享 ' + (i + 1) + '/' + shares.length + ' · ' + share.url +
-            '\n已扫描 ' + p.files + ' 项，' + p.folders + ' 个已访问目录，' +
-            p.pending + ' 个待访问目录，' + p.pages + ' 次请求');
-        });
-        results.push(result);
+      if (reuse) {
+        results = cached.results;
+      } else {
+        // 开始导出时重新获取最新清单；复制则可以复用同一输入的完整扫描结果。
+        cached = null;
+        for (let i = 0; i < shares.length; i++) {
+          const share = shares[i];
+          status('正在处理分享 ' + (i + 1) + '/' + shares.length + '\n' + share.url +
+            '\n正在获取访问令牌…');
+          const result = await scanShare(share, recursive, controller.signal, function (p) {
+            status('分享 ' + (i + 1) + '/' + shares.length + ' · ' + share.url +
+              '\n已扫描 ' + p.files + ' 项，' + p.folders + ' 个已访问目录，' +
+              p.pending + ' 个待访问目录，' + p.pages + ' 次请求');
+          });
+          results.push(result);
+        }
+        if (controller.signal.aborted) throw new DOMException('已停止', 'AbortError');
+        cached = { key: key, results: results };
       }
-      if (controller.signal.aborted) throw new DOMException('已停止', 'AbortError');
-      download(results, format, recursive);
-      const items = results.reduce(function (sum, result) { return sum + result.rows.length; }, 0);
-      status('完成：' + results.length + ' 个分享，' + items + ' 条记录。\n已生成 ' +
-        format.toUpperCase() + ' 文件。若未出现下载，请检查浏览器下载权限。');
+      if (action === 'copy') {
+        await copyNames(results);
+      } else {
+        download(results, format, recursive);
+        const items = results.reduce(function (sum, result) { return sum + result.rows.length; }, 0);
+        status('完成：' + results.length + ' 个分享，' + items + ' 条记录。\n已生成 ' +
+          format.toUpperCase() + ' 文件。若未出现下载，请检查浏览器下载权限。');
+      }
     } catch (err) {
       const reason = controller.signal.aborted || err.name === 'AbortError' ?
-        '扫描已停止，未导出不完整数据。' :
-        '导出失败，未导出不完整数据。\n' + err.message;
+        '扫描已停止，未复制或导出不完整数据。' :
+        '操作失败，未复制或导出不完整数据。\n' + err.message;
       status(reason + (results.length ? '\n此前已成功扫描 ' + results.length + ' 个分享。' : ''), true);
       console.error('[Quark File List Exporter]', err);
     } finally {
       controller = null;
       setRunning(false);
     }
-  });
+  }
+
+  $('start').addEventListener('click', function () { void run('export'); });
+  $('copy-names').addEventListener('click', function () { void run('copy'); });
 })();
